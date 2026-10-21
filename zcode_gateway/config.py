@@ -143,7 +143,7 @@ class GeneratorConfig(BaseModel):
     captcha: str = "manual"            # manual | auto
     headless: bool = False             # only applies when captcha == 'auto'
     claim: bool = True                 # claim the invite Global Build after signup
-    invite_code: str = "MT9GNDQ8"      # referral code to claim ('' = off)
+    invite_code: str = ""              # YOUR referral code ('' = off)
     # Which proxy schemes the generator may pick from the pool:
     #   all | socks | socks5 | socks4 | http  (or a comma list: "socks5,http")
     # 'socks' = socks4+5 (default: residential-style passes the Starter gate).

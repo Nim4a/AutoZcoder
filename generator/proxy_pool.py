@@ -456,7 +456,7 @@ def source_stats() -> list[dict]:
 
 def fetch_source(proto, url):
     try:
-        r = requests.get(url, timeout=30, verify=False, headers={'User-Agent': UA})
+        r = requests.get(url, timeout=30, headers={'User-Agent': UA})
         parsed = pp.parse_proxy_list(r.text, proto)
         got = [pp.to_url(e['proto'], e['host'], e['port'], e['auth']) for e in parsed]
         if MAX_PER_SOURCE and len(got) > MAX_PER_SOURCE:

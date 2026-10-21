@@ -1310,7 +1310,7 @@ class GeneratorManager:
         self.retries = 5
         self.claim = True                   # invite Global Build claim on/off
         self.headless = False               # default: visible window (manual captcha needs it)
-        self._invite_code = "MT9GNDQ8"      # referral code ('' = off; overridden by config)
+        self._invite_code = ""               # referral code ('' = off; overridden by config)
         self.pool_file = self.data_dir / "proxies.txt"
         self.evergood_file = self.data_dir / "proxies_evergood.txt"
         self.bad_file = self.data_dir / "proxies_bad.txt"

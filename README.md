@@ -18,7 +18,7 @@ ZCode accounts behind one key, and can create new accounts for you on demand.
 | `zcode_gateway/dashboard/` | The dashboard SPA (served at `/dash`) |
 | `generator/` | The account generator: signup, captcha solving, invite claim, proxy pool |
 | `mail-worker/` | Cloudflare Email Worker that receives signup verification mail |
-| `tests/` | Offline test suite (161 tests) |
+| `tests/` | Offline test suite (251 tests) |
 | `tools/` | `import_account.py`, `smoke_live.py` |
 | `docs/` | Protocol notes and diagnosis write-ups |
 
@@ -172,6 +172,17 @@ CLI: `python generator/proxy_pool.py{ fetch | verify | recheck | pick | geo | st
 - A relay that rejects the key answers `401` with `x-relay-error`; the gateway
   treats that as a relay-side failure and rotates, instead of killing a healthy
   ZCode account as if its token had been revoked.
+- **No static shared secret ships in the source.** The old `gateway-internal`
+  bearer sentinel was a public value that any local process could use to drive
+  the admin API; it is gone. Internal calls authenticate with the per-process
+  token the gateway hands to its own children.
+- **TLS is verified everywhere**, including the mailbox API that carries the
+  signup password and the proxy-list fetches. A broken local CA is fixed with
+  `certifi` / the OS trust store, not by disabling verification.
+- **No referral code and no mail domain are baked in.** `generator.invite_code`
+  and the generator's mail domain are empty by default: a domain shipped in the
+  repo would route every user's verification mail to the upstream author.
+  Set your own in `config.yaml` or **Generator → Email setup**.
 
 ## Layout
 

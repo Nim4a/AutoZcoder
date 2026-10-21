@@ -634,7 +634,9 @@ def ping_relay(relay_url: str, timeout: float = 12.0,
         headers[RELAY_KEY_HEADER] = relay_key
     t0 = time.time()
     try:
-        r = requests.get(relay_url, headers=headers, timeout=timeout, verify=False)
+        # TLS is verified: truststore (injected at import) points the whole
+        # process at the OS trust store, which is what a frozen build needs.
+        r = requests.get(relay_url, headers=headers, timeout=timeout)
         elapsed_ms = int((time.time() - t0) * 1000)
         if r.status_code == 200:
             return {"ok": True, "status": 200, "elapsed_ms": elapsed_ms}

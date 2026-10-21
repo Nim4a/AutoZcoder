@@ -167,7 +167,8 @@ def test_manual_captcha_forces_visible_browser():
         assert opt["captcha"] == "manual"
         assert opt["headless"] is False
         assert opt["claim"] is True
-        assert opt["invite_code"] == "MT9GNDQ8"
+        # no referral code is inherited from the upstream author
+        assert opt["invite_code"] == ""
 
         # asking for headless while manual must not stick
         mgr.set_options(headless=True)

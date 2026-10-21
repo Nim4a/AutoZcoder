@@ -682,8 +682,9 @@ def _generator(request: Request):
                                python_exe=getattr(gc, "python_exe", ""),
                                data_dir=data_dir)
         mgr.internal_token = state.internal_token
-        # defaults come from config.yaml; '' invite_code would mean "off", but
-        # the shipped default is the project's referral code (claim stays on)
+        # defaults come from config.yaml; '' invite_code means "off" — the
+        # user must enter their own referral code (the upstream author's
+        # code is never inherited silently).
         mgr.claim = bool(gc.claim)
         mgr._invite_code = gc.invite_code
         if gc.captcha in ("auto", "manual"):

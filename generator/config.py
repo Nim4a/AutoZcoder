@@ -32,11 +32,11 @@ CONFIG = {
     'drag_dead_zone': 60.0,
     'drag_ratio': 1.0,
     'mail_domains': [],            # extra personal domains; ZAI_MAIL_DOMAIN picks one per signup
-    'mail_domain': 'behnamrjd.me', # default/fallback domain
+    'mail_domain': '',             # YOUR domain (catch-all) — empty means "not configured"
     'manual_captcha': False,       # True (or env ZAI_MANUAL=1): you solve the slider by hand
     'proxy': None,                 # single proxy URL, or use env ZAI_PROXY
     'proxy_retries': 5,            # auto-rotate to a fresh proxy on failure (proxy mode only)
-    'invite_code': 'MT9GNDQ8',     # referral Global Build claim; '' disables, ZAI_INVITE_CODE overrides
+    'invite_code': '',             # YOUR referral code ('' disables; ZAI_INVITE_CODE overrides)
     'mail_inbox_url': None,        # e.g. https://zai-mail.<you>.workers.dev/inbox
     'mail_inbox_secret': None,     # same value as INBOX_SECRET in the worker
     'max_acceptable_spread': 30.0,

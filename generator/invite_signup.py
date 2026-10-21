@@ -34,7 +34,7 @@ ACC_FILE = os.path.join(OUTPUT_DIR, f'accounts{OUT_SUFFIX}.txt')
 PLANS_FILE = os.path.join(OUTPUT_DIR, f'plans{OUT_SUFFIX}.jsonl')
 STARTER_FILE = os.path.join(OUTPUT_DIR, f'starter{OUT_SUFFIX}.txt')
 
-DEFAULT_URL = 'https://zcode.z.ai/invite/MT9GNDQ8'
+DEFAULT_URL = os.environ.get('ZAI_INVITE_URL', '')
 
 UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')

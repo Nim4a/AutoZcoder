@@ -293,11 +293,18 @@ class MailTM:
 
     def __init__(self):
         import requests
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        # Verify the certificate. The mailbox API carries the account
+        # password, so an unverified connection here is a MITM on the
+        # user's credentials. certifi is the CA bundle; ZAI_INSECURE_SSL is
+        # an explicit opt-out for a broken local CA.
+        try:
+            import certifi
+            self._verify = certifi.where() if not os.environ.get('ZAI_INSECURE_SSL') else False
+        except Exception:
+            self._verify = True
         self.base_url = 'https://api.mail.tm'
         self.session = requests.Session()
-        self.session.verify = False  # mail.tm cert chain not in certifi bundle on this box
+        self.session.verify = self._verify
         self.session.headers.update({
             'Content-Type': 'application/json',
             'Accept': 'application/json'
@@ -309,7 +316,7 @@ class MailTM:
 
     def get_domain(self):
         try:
-            resp = self.session.get(f'{self.base_url}/domains', verify=False)
+            resp = self.session.get(f'{self.base_url}/domains')
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list) and len(data) > 0:
@@ -347,7 +354,7 @@ class MailTM:
         }
 
         try:
-            resp = self.session.post(f'{self.base_url}/accounts', json=payload, verify=False)
+            resp = self.session.post(f'{self.base_url}/accounts', json=payload)
             if resp.status_code in [200, 201]:
                 self.account = resp.json()
                 logger.info(f"Created mail.tm account: {self.email}")
@@ -369,7 +376,7 @@ class MailTM:
         }
 
         try:
-            resp = self.session.post(f'{self.base_url}/token', json=payload, verify=False)
+            resp = self.session.post(f'{self.base_url}/token', json=payload)
             if resp.status_code == 200:
                 data = resp.json()
                 self.token = data.get('token')
@@ -389,7 +396,7 @@ class MailTM:
         if not self.token:
             return None
         try:
-            resp = self.session.get(f'{self.base_url}/messages', verify=False)
+            resp = self.session.get(f'{self.base_url}/messages')
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list):
@@ -405,7 +412,7 @@ class MailTM:
         if not self.token:
             return None
         try:
-            resp = self.session.get(f'{self.base_url}/messages/{message_id}', verify=False)
+            resp = self.session.get(f'{self.base_url}/messages/{message_id}')
             return resp.json() if resp.status_code == 200 else None
         except:
             return None
@@ -866,8 +873,11 @@ class CatchAllMail:
 
     def __init__(self, domain=None, logger_instance=None):
         self.logger = logger_instance or logging.getLogger(__name__)
+        # Your own catch-all domain. There is no default: a domain shipped in
+        # the repo would route every user's verification mail to the
+        # upstream author. Set ZAI_MAIL_DOMAIN, or list it in mail_domains.
         self.domain = (os.environ.get('ZAI_MAIL_DOMAIN') or domain
-                       or CONFIG.get('mail_domain', 'behnamrjd.me'))
+                       or CONFIG.get('mail_domain') or '')
         self.user = os.environ.get('ZAI_GMAIL_USER')
         self.app_pw = os.environ.get('ZAI_GMAIL_APP_PW')
         self.inbox_url = os.environ.get('ZAI_INBOX_URL') or CONFIG.get('mail_inbox_url')
@@ -896,8 +906,14 @@ class CatchAllMail:
         return random.choice(domains) if domains else self.domain
 
     def create_account(self) -> bool:
+        domain = self._pick_domain()
+        if not domain:
+            self.logger.error(
+                "No mail domain configured. Set ZAI_MAIL_DOMAIN, or add your own "
+                "catch-all domain under Generator → Email setup.")
+            return False
         local = 'zai' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-        self.email = f"{local}@{self._pick_domain()}"
+        self.email = f"{local}@{domain}"
         self.password = ''.join(random.choices(
             string.ascii_letters + string.digits + "!@#$%*", k=16))
         return True
@@ -996,7 +1012,7 @@ class CatchAllMail:
 def main():
     global IS_HEADLESS
     print("\n" + "="*50)
-    print(f"Z.ai Auto Signup ({CONFIG.get('mail_domain', 'behnamrjd.me')} catch-all)")
+    print(f"Z.ai Auto Signup ({CONFIG.get('mail_domain') or 'no domain configured — set ZAI_MAIL_DOMAIN'} catch-all)")
     print("="*50)
 
     kill_stale_browsers()   # clear windows orphaned by a previously killed run
@@ -1026,7 +1042,7 @@ def main():
 
     mail = CatchAllMail(logger_instance=logger)
     if not mail.create_account():
-        print("Failed to create mail account")
+        print("Failed to create mail account (is your catch-all domain configured?)")
         return
 
     email = mail.email

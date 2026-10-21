@@ -1,17 +1,17 @@
 # zai-mail — Cloudflare Email Worker
 
-Catch-all mail for `behnamrjd.me` → this Worker → KV → the generator polls it over HTTP.
+Catch-all mail for `your-domain.example` → this Worker → KV → the generator polls it over HTTP.
 No Gmail, no IMAP, no app password.
 
 ```
-zai<random>@behnamrjd.me  --(cloudflare email routing)-->  zai-mail Worker  -->  KV
+zai<random>@your-domain.example  --(cloudflare email routing)-->  zai-mail Worker  -->  KV
 generator:  GET https://zai-mail.<you>.workers.dev/inbox?to=<addr>&k=<secret>
 ```
 
 ## Deploy
 
 ```powershell
-cd D:\JB\zcode-mitm\ZCODEAUTO\mail-worker
+cd <this>\mail-worker
 npm i -g wrangler            # once
 wrangler login               # opens a browser, authorize
 
@@ -27,10 +27,10 @@ wrangler deploy
 
 Then wire it in the dashboard:
 
-1. **Email Routing → behnamrjd.me → Destination Workers** → the `zai-mail` worker should be
+1. **Email Routing → your-domain.example → Destination Workers** → the `zai-mail` worker should be
    listed (create/bind it if the UI asks).
 2. **Routes → Catch-all → Edit** → Action = **Send to a Worker** → select `zai-mail` → Save.
-3. Send a test: mail anything to `test123@behnamrjd.me`, then open:
+3. Send a test: mail anything to `test123@your-domain.example`, then open:
    `https://zai-mail.<you>.workers.dev/inbox?k=<secret>`
 
 ## Endpoints
@@ -47,7 +47,7 @@ Then wire it in the dashboard:
 
 `gen/config.py`:
 ```python
-'mail_domain': 'behnamrjd.me',
+'mail_domain': 'your-domain.example',
 'mail_inbox_url': 'https://zai-mail.<you>.workers.dev/inbox',
 'mail_inbox_secret': '<the same secret>',
 ```

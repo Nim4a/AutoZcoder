@@ -8,11 +8,6 @@ from fastapi import HTTPException, Request
 
 from .state import AppState
 
-# Legacy static sentinel: only honored when the request originates from
-# loopback. Local children started before this scheme (and manual CLI runs
-# like claim100) keep working on a 127.0.0.1 tool.
-_LEGACY_INTERNAL = "gateway-internal"
-
 
 def _is_loopback(request: Request) -> bool:
     client = request.client.host if request.client else ""
@@ -20,11 +15,18 @@ def _is_loopback(request: Request) -> bool:
 
 
 def _is_internal(request: Request, state: AppState, supplied: str) -> bool:
+    """The per-process internal token, accepted only from loopback.
+
+    There is deliberately no static fallback value: a sentinel that ships in
+    a public repo is a public secret, and any local process could use it to
+    drive the admin API. Children get the real token over the environment
+    (ZAI_GATEWAY_INTERNAL_TOKEN).
+    """
     if not supplied:
         return False
-    if hmac.compare_digest(state.internal_token, supplied):
-        return True
-    return supplied == _LEGACY_INTERNAL and _is_loopback(request)
+    if not _is_loopback(request):
+        return False
+    return hmac.compare_digest(state.internal_token, supplied)
 
 
 def get_state(request: Request) -> AppState:

@@ -11,7 +11,7 @@ Chain (all from the 100m-accept HAR):
 
 Usage from the generator (after finish_signup):
     from invite_claim import claim_invite
-    ok = claim_invite(chat_token, invite_code='MT9GNDQ8')
+    ok = claim_invite(chat_token, invite_code=os.environ.get('ZAI_INVITE_CODE', ''))
 
 Standalone:
     python invite_claim.py <chat_token> [invite_code]
@@ -353,20 +353,24 @@ def send_one_message(zcode_jwt, log=print, retries=2):
     electron headers, stream=True) which passes upstream risk control with 200."""
     import requests
     gateway_url = os.environ.get("ZAI_GATEWAY_URL") or "http://127.0.0.1:8788"
-    # Per-run token when spawned by the gateway; legacy static value only
-    # authenticates from loopback (manual CLI runs of this repo's tools).
-    internal = os.environ.get("ZAI_GATEWAY_INTERNAL_TOKEN") or "gateway-internal"
+    # Per-run token when spawned by the gateway. There is no static
+    # fallback: a hardcoded sentinel would be a public secret that any
+    # local process could use to drive the admin API.
+    internal = os.environ.get("ZAI_GATEWAY_INTERNAL_TOKEN") or ""
+    if not internal:
+        log("  invite: no gateway token — sending directly")
     try:
         gr = requests.post(
             f"{gateway_url}/admin/dash/generator/send_claim_message",
             json={"zjwt": zcode_jwt},
             headers={"Authorization": f"Bearer {internal}"},
             timeout=15,
-        )
-        if gr.status_code == 200 and gr.json().get("ok"):
+        ) if internal else None
+        if gr is not None and gr.status_code == 200 and gr.json().get("ok"):
             log("  invite: client message sent via gateway (200)")
             return _send_confirmed(zcode_jwt, log)
-        log(f"  invite: gateway send -> {gr.status_code} {gr.text[:120]}")
+        if gr is not None:
+            log(f"  invite: gateway send -> {gr.status_code} {gr.text[:120]}")
     except Exception as e:
         log(f"  invite: gateway send skipped ({type(e).__name__}) — falling back to direct")
 
@@ -675,7 +679,7 @@ def zai_login(zai_access_token, log=print):
 
 
 @_direct_proxy_while
-def claim_invite(chat_token: str, invite_code: str = 'MT9GNDQ8', log=print,
+def claim_invite(chat_token: str, invite_code: str = '', log=print,
                  headless: bool = False, manual_accept: bool = False,
                  zjwt: str = None, captcha_param: str = None,
                  force_direct: bool = False) -> dict:
@@ -1068,7 +1072,11 @@ def claim_invite(chat_token: str, invite_code: str = 'MT9GNDQ8', log=print,
 
 if __name__ == '__main__':
     tok = sys.argv[1] if len(sys.argv) > 1 else None
-    code = sys.argv[2] if len(sys.argv) > 2 else 'MT9GNDQ8'
+    code = sys.argv[2] if len(sys.argv) > 2 else os.environ.get('ZAI_INVITE_CODE', '')
+    if not code:
+        print('usage: python invite_claim.py <chat_token> <invite_code>')
+        print('       (or set ZAI_INVITE_CODE — there is no built-in referral code)')
+        sys.exit(1)
     if not tok:
         # try newest account from output
         import glob
