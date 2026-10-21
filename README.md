@@ -162,6 +162,16 @@ CLI: `python generator/proxy_pool.py{ fetch | verify | recheck | pick | geo | st
   admin/client keys on first run.
 - Credential decryption uses the Windows AES-GCM implementation via CNG. On
   non-Windows, encrypted imports require `cryptography`.
+- **Edge relays require a shared key.** A deployed relay without one is an open
+  proxy on your edge account: anyone who learns the URL can forward traffic
+  through your Cloudflare/Vercel/Deno/Netlify IP. Each relay deployed from
+  this app gets a random `x-relay-key` baked into the worker code; the gateway
+  sends it on every request. Relays added by hand need their key pasted into
+  **Proxy → Add Relay** — a relay with no key is flagged in the dashboard.
+  The key is stripped before the request is forwarded upstream.
+- A relay that rejects the key answers `401` with `x-relay-error`; the gateway
+  treats that as a relay-side failure and rotates, instead of killing a healthy
+  ZCode account as if its token had been revoked.
 
 ## Layout
 

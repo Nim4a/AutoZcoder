@@ -330,6 +330,18 @@ class UpstreamClient:
                     fwd_headers = dict(headers)
                     fwd_headers["x-relay-target"] = target
                     fwd_headers["x-relay-path"] = relay_path
+                    # the relay's shared key: without it the worker answers 401
+                    relay_key = ""
+                    if self.relay_manager:
+                        getter = getattr(self.relay_manager, "get_relay_key", None)
+                        if getter:
+                            candidate = getter(relay_url)
+                            # a stubbed manager may return a mock; only a real
+                            # string can go into a header
+                            if isinstance(candidate, str):
+                                relay_key = candidate
+                    if relay_key:
+                        fwd_headers["x-relay-key"] = relay_key
                     req = self._client.build_request(
                         "POST", relay_url, headers=fwd_headers, json=body,
                     )
@@ -355,6 +367,17 @@ class UpstreamClient:
                 self.relay_manager.mark_relay_failed(relay_url)
                 tried_relay_urls.append(relay_url)
                 last_exc = TransportError(f"relay {relay_url} returned {resp.status_code}")
+                continue
+
+            if relay_url and resp.status_code == 401 and "x-relay-error" in resp.headers:
+                # The relay rejected our shared key. This is a relay-side
+                # failure, NOT an expired ZCode token: passing it through
+                # would kill healthy accounts as if they were revoked.
+                await resp.aclose()
+                self.relay_manager.mark_relay_failed(relay_url)
+                tried_relay_urls.append(relay_url)
+                last_exc = TransportError(
+                    f"relay {relay_url} rejected the shared key (401)")
                 continue
 
             if relay_url and self.relay_manager:

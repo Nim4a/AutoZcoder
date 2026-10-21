@@ -1043,9 +1043,10 @@ async def add_relay_endpoint(request: Request, body: dict = Body(...),
     name = str(body.get("name") or "").strip()
     url = str(body.get("url") or "").strip()
     type_name = str(body.get("type") or "custom").strip()
+    key = str(body.get("key") or body.get("relayKey") or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="Relay URL is required")
-    entry = mgr.add_relay(name, url, type_name)
+    entry = mgr.add_relay(name, url, type_name, key=key)
     return {"ok": True, "relay": entry}
 
 
@@ -1059,7 +1060,8 @@ async def test_relay_endpoint(request: Request, body: dict = Body(...),
         res = await asyncio.to_thread(mgr.test_relay_by_id, relay_id)
     elif url:
         from .relay_deploy import ping_relay
-        res = await asyncio.to_thread(ping_relay, url)
+        res = await asyncio.to_thread(
+            ping_relay, url, 12.0, str(body.get("key") or body.get("relayKey") or ""))
     else:
         raise HTTPException(status_code=400, detail="Relay ID or URL is required")
     return res

@@ -22,10 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from .relay_deploy import (
+    RELAY_KEY_HEADER,
     deploy_cloudflare,
     deploy_deno,
     deploy_netlify,
     deploy_vercel,
+    new_relay_secret,
     ping_relay,
 )
 
@@ -74,7 +76,7 @@ class RelayManager:
             if not url:
                 continue
             try:
-                res = ping_relay(url)
+                res = ping_relay(url, relay_key=r.get("key") or "")
                 r["last_status"] = res.get("status")
                 r["last_error"] = res.get("error")
                 r["last_latency_ms"] = res.get("elapsed_ms")
@@ -198,6 +200,15 @@ class RelayManager:
     def get_relay_count(self) -> int:
         return len(self.get_settings().get("relays") or [])
 
+    def get_relay_key(self, relay_url: str) -> str:
+        """The shared key for a relay URL ("" when the relay has none)."""
+        if not relay_url:
+            return ""
+        for r in self.get_settings().get("relays") or []:
+            if r.get("url") == relay_url:
+                return r.get("key") or ""
+        return ""
+
     def get_relay_for_model(self, model: str) -> str | None:
         """Return a relay URL (per strategy) if enabled and applicable for this model."""
         if not model:
@@ -215,7 +226,8 @@ class RelayManager:
         url = ((pick or {}).get("url") or "").strip()
         return url or (st.get("active_url") or "").strip() or None
 
-    def add_relay(self, name: str, url: str, type_name: str = "custom") -> dict[str, Any]:
+    def add_relay(self, name: str, url: str, type_name: str = "custom",
+                  key: str = "") -> dict[str, Any]:
         st = self.get_settings()
         # uuid4: timestamp-based ids collided when two adds landed in the same
         # millisecond (delete then removed both)
@@ -226,6 +238,7 @@ class RelayManager:
             "name": name or f"{type_name}-relay",
             "type": type_name,
             "url": url.strip(),
+            "key": (key or "").strip(),
             "created_at": time.time(),
             "last_status": None,
             "last_error": None,
@@ -297,7 +310,7 @@ class RelayManager:
         target = next((r for r in st["relays"] if r.get("id") == relay_id), None)
         if not target:
             return {"ok": False, "error": "Relay not found"}
-        res = ping_relay(target["url"])
+        res = ping_relay(target["url"], relay_key=target.get("key") or "")
         target["last_status"] = res.get("status")
         target["last_error"] = res.get("error")
         target["last_latency_ms"] = res.get("elapsed_ms")
@@ -307,27 +320,35 @@ class RelayManager:
 
     def deploy_and_add(self, relay_type: str, params: dict[str, Any]) -> dict[str, Any]:
         relay_type = (relay_type or "").lower().strip()
+        # One shared key per relay: baked into the deployed worker and sent
+        # on every request. Without it the worker is an open proxy.
+        secret = str(params.get("relayKey") or params.get("relay_key") or "").strip() \
+            or new_relay_secret()
         if relay_type == "cloudflare":
             res = deploy_cloudflare(
                 account_id=params.get("accountId") or params.get("account_id") or "",
                 api_token=params.get("apiToken") or params.get("api_token") or "",
                 project_name=params.get("projectName") or params.get("project_name") or "",
+                relay_secret=secret,
             )
         elif relay_type == "vercel":
             res = deploy_vercel(
                 vercel_token=params.get("vercelToken") or params.get("token") or "",
                 project_name=params.get("projectName") or params.get("project_name") or "",
+                relay_secret=secret,
             )
         elif relay_type == "deno":
             res = deploy_deno(
                 deno_token=params.get("denoToken") or params.get("token") or "",
                 org_domain=params.get("orgDomain") or params.get("org_domain") or "",
                 app_name=params.get("projectName") or params.get("app_name") or "",
+                relay_secret=secret,
             )
         elif relay_type == "netlify":
             res = deploy_netlify(
                 netlify_token=params.get("netlifyToken") or params.get("token") or "",
                 site_name=params.get("projectName") or params.get("site_name") or "",
+                relay_secret=secret,
             )
         else:
             raise ValueError(f"Unknown relay type: {relay_type}")
@@ -336,5 +357,6 @@ class RelayManager:
             name=res.get("name", f"{relay_type}-relay"),
             url=res.get("url", ""),
             type_name=relay_type,
+            key=res.get("relay_key") or secret,
         )
         return {"ok": True, "relay": entry}

@@ -2213,7 +2213,7 @@ api_key: ${esc(s.admin_key)}   # or any client key</p>
             <td style="padding:8px">
               <input type="radio" name="active-relay" ${isActive ? 'checked' : ''} data-act="relaySetActive" data-id="${esc(r.id)}">
             </td>
-            <td style="padding:8px"><b>${esc(r.name || r.id)}</b></td>
+            <td style="padding:8px"><b>${esc(r.name || r.id)}</b>${r.key ? '' : '<div style="font-size:10px;color:var(--warn,#eab308)">no key — open proxy</div>'}</td>
             <td style="padding:8px">${typeIcons[r.type] || r.type}</td>
             <td style="padding:8px" class="mono" title="${esc(r.url)}">${esc(r.url.length > 42 ? r.url.slice(0, 39) + '…' : r.url)}</td>
             <td style="padding:8px" id="relay-status-${esc(r.id)}">${statusBadge}</td>
@@ -2497,6 +2497,11 @@ api_key: ${esc(s.admin_key)}   # or any client key</p>
             <input type="url" id="rf-cs-url" placeholder="https://my-relay.workers.dev" style="width:100%;background:var(--field);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font:13px sans-serif;outline:none">
             <div class="note" style="color:var(--faint);font-size:11px;margin-top:3px">Must be an HTTPS endpoint implementing <code>x-relay-target</code> and <code>x-relay-path</code>.</div>
           </div>
+          <div>
+            <label class="lbl">Relay Key <span style="color:var(--faint);font-weight:400">(optional)</span></label>
+            <input type="password" id="rf-cs-key" placeholder="x-relay-key shared secret" style="width:100%;background:var(--field);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font:13px sans-serif;outline:none">
+            <div class="note" style="color:var(--faint);font-size:11px;margin-top:3px">Workers deployed from this app require the shared key. Leave empty only for a relay that has no key.</div>
+          </div>
           <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
             <button class="btn btn-ghost" onclick="App.closeRelayModal()">Cancel</button>
             <button class="btn btn-pri" onclick="App.relayAddCustom()">Add Relay</button>
@@ -2550,11 +2555,12 @@ api_key: ${esc(s.admin_key)}   # or any client key</p>
   async function relayAddCustom(){
     const name = ($("#rf-cs-name")||{}).value;
     const url = ($("#rf-cs-url")||{}).value;
+    const key = ($("#rf-cs-key")||{}).value;
     if (!url) { toast("Relay URL is required", "err"); return; }
     try {
       await api("/admin/dash/relays/add", {
         method: "POST",
-        body: JSON.stringify({ name, url, type: "custom" })
+        body: JSON.stringify({ name, url, type: "custom", key })
       });
       toast("Relay added", "ok");
       closeRelayModal();
