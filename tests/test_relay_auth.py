@@ -97,6 +97,10 @@ def test_deploy_cloudflare_bakes_the_secret(monkeypatch):
         resp.status_code = 200
         if "subdomain" in url and method == "get":
             resp.json.return_value = {"success": True, "result": {"subdomain": "my-sub"}}
+        elif "subdomain" in url and method == "post":
+            # per-script enable: the deployer refuses a URL whose workers.dev
+            # route did not actually come up
+            resp.json.return_value = {"success": True, "result": {"enabled": True}}
         else:
             resp.json.return_value = {"success": True}
         return resp
