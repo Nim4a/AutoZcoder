@@ -45,6 +45,7 @@ def test_generator_manager_options():
         assert opts["pin_proxy"] == "socks5://1.2.3.4:1080"
         assert opts["retries"] == 3
         assert opts["claim"] is True
+        assert opts["claim500"] is False
         assert opts["headless"] is False
         assert opts["invite_code"] == "CUSTOM123"
 
@@ -162,11 +163,14 @@ def test_manual_captcha_forces_visible_browser():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         mgr = GeneratorManager(Path(tmpdir), data_dir=Path(tmpdir))
-        # defaults: you solve it, in a visible window, claiming the referral
+        # defaults: you solve it, in a visible window; the Start Plan claim is
+        # on, both legacy campaigns (100M invite / 500M giveaway) are off
         opt = mgr.options()
         assert opt["captcha"] == "manual"
         assert opt["headless"] is False
-        assert opt["claim"] is True
+        assert opt["claim"] is False
+        assert opt["claim500"] is False
+        assert opt["claim_start"] is True
         # no referral code is inherited from the upstream author
         assert opt["invite_code"] == ""
 

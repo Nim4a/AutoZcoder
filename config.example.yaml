@@ -56,7 +56,9 @@ generator:
   zcodeauto_dir: ""     # '' = auto-detect; or set the generator folder (has main.py)
   captcha: "manual"     # manual = you solve it in a visible browser | auto = solver
   headless: false       # only used with captcha: auto (manual always needs a window)
-  claim: true           # claim the invite Global Build after signup
-  invite_code: ""              # YOUR referral code ('' = off; nobody's is baked in)
+  claim: false          # legacy: invite Global Build (100M) claim after signup
+  claim500: false        # legacy: 1024 Dev Day 500M giveaway (withdrawn)
+  claim_start: true      # Start Plan auto-claim after signup (default path)
+  invite_code: ""        # YOUR referral code ('' = off; nobody's is baked in)
   socks_only: true              # legacy bool (proxy_types below overrides it)
   proxy_types: "socks"          # all | socks | socks5 | socks4 | http — pool scheme filter

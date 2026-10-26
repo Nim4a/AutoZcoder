@@ -30,7 +30,34 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)   # log handler writes inside OUTPUT_DIR
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)
 
-console_handler = logging.StreamHandler(sys.stdout)
+# stdout under the packaged exe is a cp1252 pipe: z.ai's Chinese error
+# messages (SIGNUP_RATE_LIMITED etc.) crashed the handler with
+# UnicodeEncodeError and spewed tracebacks between retries. Reconfigure the
+# stream to tolerate anything (errors are replaced, logging never dies).
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+class _SafeConsoleHandler(logging.StreamHandler):
+    """StreamHandler that can never crash on unencodable text."""
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            try:
+                self.stream.write(msg + self.terminator)
+            except UnicodeEncodeError:
+                # last resort: ASCII with escapes — a mangled line beats a
+                # dead logger and a lost message
+                self.stream.write(msg.encode('ascii', 'backslashreplace')
+                                      .decode('ascii') + self.terminator)
+        except Exception:
+            self.handleError(record)
+
+console_handler = _SafeConsoleHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s', datefmt='%H:%M:%S'))
 
@@ -182,6 +209,46 @@ def set_proxy(url):
 def _redact_proxy(url):
     """Never log a proxy's login (user:pass@) — logs are shared and end up in captures."""
     return re.sub(r'//[^/@]*@', '//', url) if url else url
+
+
+def notify_gateway(category: str, message: str, level: str = 'info') -> None:
+    """Push an event to the gateway's notification bell (fire-and-forget).
+
+    Workers are subprocesses; the only channel back is HTTP with the per-run
+    internal token. Never raises, never blocks the signup flow for long."""
+    try:
+        import requests
+        base = os.environ.get('ZAI_GATEWAY_URL') or 'http://127.0.0.1:8788'
+        internal = os.environ.get('ZAI_GATEWAY_INTERNAL_TOKEN')
+        if not internal:
+            return  # no per-run token; nothing to notify (sentinel is not a valid credential)
+        requests.post(f'{base}/admin/dash/notifications/emit',
+                      json={'category': category, 'message': message,
+                            'level': level},
+                      headers={'Authorization': f'Bearer {internal}'},
+                      timeout=4)
+    except Exception:
+        pass
+
+
+def _pool_has_live_proxy():
+    """True when the pool has any entry that could serve as a fresh exit IP.
+    Used by the SIGNUP_IP_LIMITED logic: retrying a poisoned route without
+    one is pure email-burning. An entry with a recent ok check counts;
+    pick_verified re-tests before use anyway."""
+    try:
+        import proxy_pool
+        pool = proxy_pool._load_pool_map()
+        if not pool:
+            return False
+        now = time.time()
+        for e in pool.values():
+            last_ok = float(e.get('last_ok') or 0)
+            if last_ok <= 0 or now - last_ok < 3600:
+                return True     # never checked (worth a pick) or recently ok
+        return False
+    except Exception:
+        return False
 
 
 def pick_verified_proxy():
@@ -846,11 +913,16 @@ def signup(email, password, mail=None):
                     except OSError:
                         logger.error("account created but unverified, and writing "
                                      "the recovery file failed", exc_info=True)
+                    notify_gateway('generator',
+                                   f"signup unverified (no verify mail) — account "
+                                   f"saved to recovery_accounts.txt",
+                                   level='warning')
                     browser.close()
                     _rm_profile(account_profile)
                     return 'SIGNUP_UNVERIFIED'
 
                 finish_token = None
+                finish_rate_limited = None   # (retry_after_s, scope) when IP-blocked
                 if verify_token:
                     r = _page_post('/api/v1/auths/verify_email',
                                    {'username': username, 'email': email, 'token': verify_token})
@@ -870,6 +942,17 @@ def signup(email, password, mail=None):
                         if finish_token:
                             logger.info(f"finish_signup issued token "
                                         f"(email={token_email(finish_token)})")
+                        # 429 SIGNUP_RATE_LIMITED: the body carries the whole story —
+                        # {"detail":{"code":"SIGNUP_RATE_LIMITED","retriable":true,
+                        #  "retry_after_seconds":36505,"scope":"signup:ip","message":"…"}}
+                        # Captured live 2026-10-22: the worker retried the SAME direct
+                        # route 5 times against a 10-HOUR IP lockout, burning an email
+                        # + captcha + verify cycle per retry for nothing.
+                        det = (fj.get('detail') or {})
+                        if r['status'] == 429 and det.get('code') == 'SIGNUP_RATE_LIMITED':
+                            finish_rate_limited = (
+                                int(det.get('retry_after_seconds') or 0),
+                                str(det.get('scope') or ''))
                     except Exception:
                         pass
 
@@ -901,6 +984,30 @@ def signup(email, password, mail=None):
                 logger.info(f"    auth calls seen: {captured['calls']}")
                 browser.close()
                 _rm_profile(account_profile)
+                if finish_rate_limited:
+                    # The account EXISTS and its email is VERIFIED — only the final
+                    # finish_signup call was IP-rate-limited. This is recoverable:
+                    # re-running finish_signup with these credentials after the
+                    # window (or from a different IP) completes the account.
+                    retry_after_s, scope = finish_rate_limited
+                    try:
+                        rec = Path(CONFIG.get('output_dir') or 'output') / 'recovery_accounts.txt'
+                        rec.parent.mkdir(parents=True, exist_ok=True)
+                        with open(rec, 'a', encoding='utf-8') as fh:
+                            fh.write(f"{email}:{password}:finish_blocked"
+                                     f"|retry_after={retry_after_s}|scope={scope or 'unknown'}\n")
+                    except OSError:
+                        logger.error("writing the recovery file failed", exc_info=True)
+                    logger.error(
+                        f"finish_signup IP-rate-limited (scope={scope or 'unknown'}, "
+                        f"retry in ~{retry_after_s // 3600}h) — account saved to "
+                        f"recovery_accounts.txt; NOT retrying on this route")
+                    notify_gateway('generator',
+                                   f"signup IP-rate-limited (scope={scope or 'unknown'}, "
+                                   f"~{retry_after_s // 3600}h lockout) — account saved "
+                                   f"to recovery, route switched or stopped",
+                                   level='warning')
+                    return 'SIGNUP_IP_LIMITED'
                 return None
 
             except Exception as e:
@@ -1134,6 +1241,7 @@ def main():
     starter_count = 0
     skipped = 0
     unverified = 0
+    ip_limited = 0
 
     # Retry count + routing mode resolved ONCE, before the loop — the panel
     # sends ZAI_PROXY_RETRIES and it must govern the retry loop below.
@@ -1179,9 +1287,27 @@ def main():
             result = signup(email, password, mail)
             # SIGNUP_UNVERIFIED is a HARD failure (account exists, cannot be
             # completed) — never retry it with a fresh email/proxy
-            retryable = (result is None) or (result == 'CAPTCHA_NOT_LOADED')
-            if not retryable or pr >= max_proxy_retries:
+            if result == 'SIGNUP_UNVERIFIED' or pr >= max_proxy_retries:
                 break
+            # SIGNUP_IP_LIMITED: the account exists (saved to recovery) but the
+            # ROUTE is poisoned for the lockout window. Retrying the same route
+            # burns an email+captcha per attempt for nothing; only continue
+            # when a pool proxy can give a different exit IP.
+            if result == 'SIGNUP_IP_LIMITED':
+                if CURRENT_PROXY and not pinned_mode:
+                    pass              # pool route: the normal rotation below handles it
+                elif _pool_has_live_proxy():
+                    # let the single rotation below do the pick+set (picking
+                    # here too verified a proxy and then threw it away)
+                    rotate = True
+                    logger.info("  IP rate-limited on direct — switching to a "
+                                "pool proxy for the next attempt")
+                else:
+                    logger.error("  IP rate-limited and no live pool proxy — "
+                                 "stopping (retries would burn emails for nothing)")
+                    break
+            elif result is not None and result != 'CAPTCHA_NOT_LOADED':
+                break   # success (token) — done
             newp = None
             if rotate:
                 newp = pick_verified_proxy()
@@ -1213,6 +1339,15 @@ def main():
             unverified += 1
             logger.error(f"Account {i+1} created but UNVERIFIED — see "
                          f"recovery_accounts.txt (no retry possible)")
+            continue
+
+        if result == 'SIGNUP_IP_LIMITED':
+            # account exists + verified, finish_signup was IP-rate-limited;
+            # credentials were appended to recovery_accounts.txt by signup().
+            ip_limited += 1
+            logger.error(f"Account {i+1} created but finish_signup was "
+                         f"IP-rate-limited — saved to recovery_accounts.txt; "
+                         f"route {'rotated' if rotate else 'has no alternative'}")
             continue
 
         if result:
@@ -1254,18 +1389,57 @@ def main():
                 with open(ACC_FILE, 'a') as f:
                     f.write(f"{email}:{password}:{token}\n")
 
-                # Invite-referral Global Build (100M GLM-5.3-Flash):
-                # device login FIRST, then bind, then message (proven order).
-                # Only claim accounts that actually got Starter — client chat
-                # needs a plan, and the bind is a one-shot per account.
-                # ZAI_INVITE_CODE set to empty string = explicitly OFF; absent
-                # or non-empty = use it (fall back to CONFIG).
+                # Start Plan claim (billing preview -> billing/claim).
+                # The signup grant was removed: a fresh account is NOT given a
+                # plan, it is only *offered* one, and the offer is invisible to
+                # clients older than app_version 3.16.1. This runs for EVERY
+                # created account — gating it on `starter` (the old behaviour)
+                # made it unreachable once the signup grant disappeared.
+                # ZAI_CLAIM_START=0 disables it.
+                claim_start_on = os.environ.get('ZAI_CLAIM_START', '1').strip().lower() \
+                    not in ('0', 'false', 'no', 'off')
+                # Legacy campaigns (withdrawn 2026-10): 100M invite Global Build
+                # and the 1024 500M giveaway. Off unless explicitly requested.
+                claim500_on = os.environ.get('ZAI_CLAIM500', '').strip().lower() in ('1', 'true', 'yes', 'on')
                 if 'ZAI_INVITE_CODE' in os.environ:
                     invite_code = os.environ.get('ZAI_INVITE_CODE', '')
                 else:
                     invite_code = CONFIG.get('invite_code')
                 global_build = False
-                if invite_code and starter and isinstance(result, str):
+                giveaway500 = False
+                start_plan = False
+                start_plan_id = ''
+                if claim_start_on and isinstance(result, str):
+                    try:
+                        from claim_start import claim_start as run_claim_start
+                        rc = run_claim_start(token, log=logger.info,
+                                             force_direct=False)
+                        start_plan = bool(rc.get('claimed'))
+                        start_plan_id = rc.get('plan_id') or ''
+                        if start_plan:
+                            logger.info(f"Start Plan claimed for {email} "
+                                        f"({start_plan_id or 'best offer'})")
+                        elif rc.get('needs_captcha'):
+                            logger.warning(f"Start Plan for {email} needs the "
+                                           f"Aliyun captcha (3007) — not claimed")
+                        else:
+                            logger.info(f"Start Plan not granted for {email}: "
+                                        f"{rc.get('error') or 'nothing claimable'}")
+                    except Exception as e:
+                        logger.warning(f"Start Plan claim failed: {e}")
+                elif claim500_on and isinstance(result, str):
+                    try:
+                        from claim500 import claim500 as run_claim500
+                        r500 = run_claim500(token, 'zcode-v3-start-plan-1024',
+                                            log=logger.info, force_direct=False)
+                        giveaway500 = bool(r500.get('claimed'))
+                        if giveaway500:
+                            logger.info(f"500M giveaway claimed for {email}")
+                        elif r500.get('unavailable'):
+                            logger.warning(f"500M giveaway unavailable right now - {r500.get('error')}")
+                    except Exception as e:
+                        logger.warning(f"500M claim failed: {e}")
+                elif invite_code and starter and isinstance(result, str):
                     try:
                         from invite_claim import device_login, claim_invite
                         zjwt, _ = device_login(token, log=logger.info,
@@ -1287,21 +1461,37 @@ def main():
                     except Exception as e:
                         logger.warning(f"invite claim failed: {e}")
 
+                # a claimed Start Plan makes the account poolable exactly like
+                # the old signup-granted Starter did
+                starter = starter or start_plan
+
                 with open(PLANS_FILE, 'a') as f:
                     f.write(json.dumps({
                         'email': email, 'starter': starter,
+                        'start_plan': start_plan, 'start_plan_id': start_plan_id,
                         'plans': plan.get('plans') if plan else None,
                         'global_build': global_build,
+                        'giveaway500': giveaway500,
                         'ts': int(time.time()),
                     }) + "\n")
                 if starter:
                     starter_count += 1
-                    with open(STARTER_FILE, 'a') as f:
+                    with open(STARTER_FILE, 'a', encoding='utf-8') as f:
                         f.write(f"{email}:{password}:{token}\n")
+                    if start_plan:
+                        with open(os.path.join(RESULTS_DIR, f'startplan{OUT_SUFFIX}.txt'),
+                                  'a', encoding='utf-8') as f:
+                            f.write(f"{email}:{password}:{token}\n")
+                        logger.info(f"Account {i+1} Start Plan claimed -> "
+                                    f"startplan{OUT_SUFFIX}.txt")
                 if global_build:
                     with open(os.path.join(OUTPUT_DIR, 'starter100m.txt'), 'a', encoding='utf-8') as f:
                         f.write(f"{email}:{password}:{token}\n")
                     logger.info(f"Account {i+1} 100M Global Build active -> {STARTER_FILE}100m")
+                if giveaway500:
+                    with open(os.path.join(OUTPUT_DIR, 'accounts500m.txt'), 'a', encoding='utf-8') as f:
+                        f.write(f"{email}:{password}:{token}\n")
+                    logger.info(f"Account {i+1} 500M giveaway claimed -> accounts500m.txt")
 
                 logger.info(f"Account {i+1} created with token: {token_display}")
 
@@ -1314,6 +1504,9 @@ def main():
     print(f"{starter_count} with Starter plan  ->  {STARTER_FILE}")
     if skipped:
         print(f"{skipped} skipped (captcha widget never loaded — IP-blocked)")
+    if unverified or ip_limited:
+        print(f"{unverified + ip_limited} recoverable in recovery_accounts.txt "
+              f"({unverified} unverified, {ip_limited} finish_signup IP-limited)")
     print(f"{verification_needed} need email verification")
     print(f"{ACC_FILE}")
     print(f"{_log_file}")
