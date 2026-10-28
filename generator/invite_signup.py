@@ -81,6 +81,7 @@ def main():
         print(f'[fp] chrome/{ident["chrome_major"]} · {ident["viewport"]["width"]}x{ident["viewport"]["height"]} · '
               f'cc={ident["country"]} · tz={ident["timezone_id"]}')
         ctx = p.chromium.launch_persistent_context(
+                channel='chrome',
             PROFILE_DIR,
             headless=False,
             args=BROWSER_ARGS,

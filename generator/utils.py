@@ -66,7 +66,7 @@ BROWSER_ARGS = [
     '--disable-setuid-sandbox',
     '--disable-sync',
     '--force-color-profile=srgb',
-    '--hide-scrollbars',
+    # '--hide-scrollbars',
     '--metrics-recording-only',
     '--no-first-run',
     '--no-sandbox',

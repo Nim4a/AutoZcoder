@@ -386,22 +386,6 @@ class EnvSetup:
         except Exception:
             return list(GEN_DEPS)
 
-    def _chromium_ok(self, py: str) -> bool:
-        """Playwright's own cache check: `install` is idempotent and fast
-        when the browser is present, but a dry existence probe is cheaper
-        for the status panel."""
-        try:
-            script = ("from playwright.sync_api import sync_playwright\n"
-                      "with sync_playwright() as p:\n"
-                      "    import os\n"
-                      "    exe = p.chromium.executable_path\n"
-                      "    print('1' if exe and os.path.exists(exe) else '0')")
-            r = subprocess.run([py, "-c", script], capture_output=True,
-                               text=True, timeout=60, **_child_kwargs())
-            return (r.stdout or "").strip().endswith("1")
-        except Exception:
-            return False
-
     def _pip_install(self, py: str, pkgs: list[str]) -> bool:
         self._emit(f"pip install {' '.join(pkgs)} …")
         return self._run([py, "-m", "pip", "install", "--upgrade"] + pkgs)
@@ -434,6 +418,25 @@ class EnvSetup:
         return proc.returncode == 0
 
     # ---------------------------------------------------------- the flow
+    def _chromium_ok(self, py: str) -> bool:
+        """Playwright check: accept Playwright Chromium OR system Chrome."""
+        try:
+            script = ("from playwright.sync_api import sync_playwright\n"
+                      "with sync_playwright() as p:\n"
+                      "    import os\n"
+                      "    for pp in (r'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',):\n"
+                      "        if os.path.exists(pp):\n"
+                      "            print('1'); raise SystemExit\n"
+                      "    exe = p.chromium.executable_path\n"
+                      "    print('1' if exe and os.path.exists(exe) else '0')")
+            r = subprocess.run([py, "-c", script], capture_output=True,
+                               text=True, timeout=60, **_child_kwargs())
+            return (r.stdout or "").strip().endswith("1")
+        except Exception:
+            return False
+
+
+
     def check(self) -> dict:
         """Synchronous full check (fast, read-only). Returns the status the
         modal shows: each step ok/missing."""
@@ -576,6 +579,24 @@ class PlaywrightSetup:
         proc.wait()
         return proc.returncode == 0
 
+    def _chromium_ok(self, py: str) -> bool:
+        """Playwright check: accept Playwright Chromium OR system Chrome."""
+        try:
+            script = ("from playwright.sync_api import sync_playwright\n"
+                      "with sync_playwright() as p:\n"
+                      "    import os\n"
+                      "    for pp in (r'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',):\n"
+                      "        if os.path.exists(pp):\n"
+                      "            print('1'); raise SystemExit\n"
+                      "    exe = p.chromium.executable_path\n"
+                      "    print('1' if exe and os.path.exists(exe) else '0')")
+            r = subprocess.run([py, "-c", script], capture_output=True,
+                               text=True, timeout=60, **_child_kwargs())
+            return (r.stdout or "").strip().endswith("1")
+        except Exception:
+            return False
+
+
     def ensure(self, python_exe: str, emit=print) -> bool:
         """Make sure `python_exe` can run Playwright + Chromium. Fast no-op
         when everything is already installed."""
@@ -595,11 +616,13 @@ class PlaywrightSetup:
                                   "playwright"], emit):
                     emit("  playwright install FAILED — see lines above")
                     return False
-            # 2) chromium browser present? `playwright install` is idempotent:
-            # it verifies the cache and exits fast when up to date.
+            # 2) chromium browser present? Use system Chrome if Playwright's
+            # own Chromium isn't installed (avoids a 170 MB download).
             emit("checking chromium browser (one-time setup)…")
-            if not self._run([py, "-m", "playwright", "install", "chromium"],
-                             emit):
+            if self._chromium_ok(py):
+                emit("Chromium already installed (system Chrome) ✓")
+            elif not self._run([py, "-m", "playwright", "install", "chromium"],
+                               emit):
                 emit("  chromium install FAILED — see lines above")
                 return False
             self._done = True

@@ -861,7 +861,8 @@ def claim_invite(chat_token: str, invite_code: str = '', log=print,
         launch_kwargs['locale'] = ident['locale']
         launch_kwargs['timezone_id'] = ident['timezone_id']
         ctx = p.chromium.launch_persistent_context(
-            profile, **launch_kwargs)
+            profile,
+            channel='chrome', **launch_kwargs)
         log('  invite: browser up')
 
         def on_response(resp):

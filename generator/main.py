@@ -587,6 +587,7 @@ def signup(email, password, mail=None):
 
             context = p.chromium.launch_persistent_context(
                 account_profile,
+                channel='chrome',
                 headless=is_headless,
                 args=BROWSER_ARGS,
                 proxy=pw_proxy(),
@@ -1079,7 +1080,7 @@ class CatchAllMail:
                 "mail goes nowhere and the account is burned.")
             return False
         local = 'zai' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-        self.email = f"{local}@{domain}"
+        self.email = f"{local}@{self.domain}"
         self.password = ''.join(random.choices(
             string.ascii_letters + string.digits + "!@#$%*", k=16))
         return True
