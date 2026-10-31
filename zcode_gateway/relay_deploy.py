@@ -163,8 +163,9 @@ CLOUDFLARE_WORKER_CODE = """export default {
       headers: new Headers(request.headers),
     };
     if (request.method !== "GET" && request.method !== "HEAD") {
-      newRequestInit.body = request.body;
-      newRequestInit.duplex = "half";
+      // Buffer the body: a stream is single-use and fetch cannot resend it
+      // when the upstream answers a redirect ("one-time-use body" 502).
+      newRequestInit.body = await request.arrayBuffer();
     }
     newRequestInit.headers.delete("x-relay-target");
     newRequestInit.headers.delete("x-relay-path");
