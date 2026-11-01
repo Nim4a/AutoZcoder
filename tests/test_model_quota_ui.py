@@ -195,7 +195,11 @@ window.view = await mount({root:document.querySelector('#root'),signal:new Abort
             browser = runtime.chromium.launch()
         except playwright.Error as exc:
             pytest.skip("Installed Chromium unavailable: " + str(exc))
-        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        # Pin the locale: the dashboard localises digits, and this assertion
+        # reads Latin numerals ("51 / 52"). Without it the test passes or fails
+        # depending on the host's system locale.
+        page = browser.new_page(viewport={"width": 1280, "height": 900},
+                                locale="en-US")
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.route("**/*", handle)
         page.goto("http://models.test/")

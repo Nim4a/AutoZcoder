@@ -83,8 +83,9 @@ def test_no_verify_false_anywhere_in_the_source():
     offenders = []
     for path in _py_sources():
         for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            code = line.split("#", 1)[0]        # comments explain why NOT to
             # `auto_verify = False` is a flag, not a TLS switch
-            if "verify=False" in line or re.search(r"\bverify\s*=\s*False", line):
+            if "verify=False" in code or re.search(r"\bverify\s*=\s*False", code):
                 offenders.append(f"{path.relative_to(REPO)}:{i}: {line.strip()}")
     assert not offenders, "TLS verification disabled:\n" + "\n".join(offenders)
 

@@ -514,11 +514,18 @@ class MailTM:
 
     def __init__(self):
         import requests
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        # Verify the certificate. The mailbox API carries the account
+        # password, so an unverified connection here is a MITM on the
+        # user's credentials. certifi is the CA bundle; ZAI_INSECURE_SSL is
+        # an explicit opt-out for a broken local CA.
+        try:
+            import certifi
+            self._verify = certifi.where() if not os.environ.get('ZAI_INSECURE_SSL') else False
+        except Exception:
+            self._verify = True
         self.base_url = 'https://api.mail.tm'
         self.session = requests.Session()
-        self.session.verify = False  # mail.tm cert chain not in certifi bundle on this box
+        self.session.verify = self._verify
         self.session.headers.update({
             'Content-Type': 'application/json',
             'Accept': 'application/json'
@@ -530,7 +537,7 @@ class MailTM:
 
     def get_domain(self):
         try:
-            resp = self.session.get(f'{self.base_url}/domains', verify=False)
+            resp = self.session.get(f'{self.base_url}/domains')
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list) and len(data) > 0:
@@ -568,7 +575,7 @@ class MailTM:
         }
 
         try:
-            resp = self.session.post(f'{self.base_url}/accounts', json=payload, verify=False)
+            resp = self.session.post(f'{self.base_url}/accounts', json=payload)
             if resp.status_code in [200, 201]:
                 self.account = resp.json()
                 logger.info(f"Created mail.tm account: {self.email}")
@@ -590,7 +597,7 @@ class MailTM:
         }
 
         try:
-            resp = self.session.post(f'{self.base_url}/token', json=payload, verify=False)
+            resp = self.session.post(f'{self.base_url}/token', json=payload)
             if resp.status_code == 200:
                 data = resp.json()
                 self.token = data.get('token')
@@ -610,7 +617,7 @@ class MailTM:
         if not self.token:
             return None
         try:
-            resp = self.session.get(f'{self.base_url}/messages', verify=False)
+            resp = self.session.get(f'{self.base_url}/messages')
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list):
@@ -626,7 +633,7 @@ class MailTM:
         if not self.token:
             return None
         try:
-            resp = self.session.get(f'{self.base_url}/messages/{message_id}', verify=False)
+            resp = self.session.get(f'{self.base_url}/messages/{message_id}')
             return resp.json() if resp.status_code == 200 else None
         except:
             return None

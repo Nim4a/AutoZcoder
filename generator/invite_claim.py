@@ -11,7 +11,7 @@ Chain (all from the 100m-accept HAR):
 
 Usage from the generator (after finish_signup):
     from invite_claim import claim_invite
-    ok = claim_invite(chat_token, invite_code='MT9GNDQ8')
+    ok = claim_invite(chat_token, invite_code='YOUR_CODE')
 
 Standalone:
     python invite_claim.py <chat_token> [invite_code]
@@ -793,7 +793,7 @@ def zai_login(zai_access_token, log=print):
 
 
 @_direct_proxy_while
-def claim_invite(chat_token: str, invite_code: str = 'MT9GNDQ8', log=print,
+def claim_invite(chat_token: str, invite_code: str = '', log=print,
                  headless: bool = False, manual_accept: bool = False,
                  zjwt: str = None, captcha_param: str = None,
                  force_direct: bool = False) -> dict:
@@ -1214,7 +1214,9 @@ def claim_invite(chat_token: str, invite_code: str = 'MT9GNDQ8', log=print,
 
 if __name__ == '__main__':
     tok = sys.argv[1] if len(sys.argv) > 1 else None
-    code = sys.argv[2] if len(sys.argv) > 2 else 'MT9GNDQ8'
+    code = sys.argv[2] if len(sys.argv) > 2 else ''
+    if not code:
+        sys.exit('usage: python invite_claim.py <chat_token> <invite_code>')
     if not tok:
         # try newest account from output
         import glob

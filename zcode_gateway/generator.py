@@ -849,12 +849,7 @@ class PlaywrightSetup:
                                   "playwright"], report):
                     report("  playwright install FAILED - " + guidance)
                     return False
-            state = self._probe(py)
-            if state == "chromium-missing" and self._chromium_ok(py):
-                # A system Chrome satisfies channel="chrome": skip the
-                # one-time 170 MB Playwright Chromium download.
-                report("Chromium already available (system Chrome)")
-                state = "ready"
+                state = self._probe(py)
             if state == "chromium-missing":
                 report("installing missing Chromium browser (no OS package changes)...")
                 if not self._run(_chromium_install_argv(py, with_deps=False), report):
