@@ -5,22 +5,12 @@ Deno Deploy, and Netlify Functions. All four relays implement the shared
 9Router specification:
     x-relay-target: https://zcode.z.ai
     x-relay-path:   /api/v1/zcode-plan/anthropic/v1/messages
-
-They additionally require a shared key:
-    x-relay-key:    <per-relay secret>
-
-Without it a deployed relay is an open proxy on the deployer's edge account.
-The secret is generated per relay, baked into the deployed code, and sent by
-the gateway on every request. A relay that predates the key (or a third-party
-9Router relay that ignores it) keeps working — the extra header is simply
-not checked.
 """
 from __future__ import annotations
 
 import hashlib
 import io
 import json
-import secrets as _secrets
 import time
 import zipfile
 from typing import Any
@@ -106,198 +96,187 @@ def _api_error(provider: str, res, doing: str) -> RelayDeployError:
         detail=f"HTTP {res.status_code}: {res.text[:300]}")
 
 # ---------------------------------------------------------------------------
-# Relay auth
-#
-# A relay without a secret is an open proxy: anyone who learns the URL can
-# forward requests through your edge IP. Every worker therefore requires an
-# `x-relay-key` header equal to a per-relay secret that the deployer
-# generates and the gateway sends. The secret is embedded in the deployed
-# code — the four platforms we deploy to do not expose function source
-# publicly. The UNSUBSTITUTED template is deliberately broken (it references
-# an undefined identifier) so a hand-copied worker fails closed instead of
-# running with a public secret.
-# ---------------------------------------------------------------------------
-
-RELAY_KEY_HEADER = "x-relay-key"
-_RELAY_SECRET_PLACEHOLDER = "__RELAY_SECRET__"
-
-
-def new_relay_secret() -> str:
-    """A fresh per-relay shared secret."""
-    return _secrets.token_urlsafe(32)
-
-
-def render_worker(code: str, secret: str) -> str:
-    """Bake the shared secret into a worker template.
-
-    The placeholder is replaced by a JSON string literal (quoted and
-    escaped), so the surrounding template needs no quoting of its own.
-    """
-    return code.replace(_RELAY_SECRET_PLACEHOLDER, json.dumps(secret))
-
-
-# ---------------------------------------------------------------------------
 # Worker Codes
+#
+# Hardened relays (previously these were open proxies: anyone who found the
+# URL could proxy arbitrary traffic — including arbitrary Authorization
+# headers — through the user's Cloudflare/Vercel/Deno/Netlify account):
+#   - secret:   callers must present x-relay-secret (constant-time compare).
+#               Empty secret = no check (legacy relays keep working).
+#   - allowlist: x-relay-target must be https AND on the allowlist
+#               (zcode.z.ai for real traffic, httpbin.org for the health
+#               ping). Arbitrary-host laundering is dead.
+#   - no-store: relay answers are never cached at the CDN edge (a cached GET
+#               could serve one caller another's proxied response).
+# __RELAY_SECRET__ / __RELAY_ALLOW__ are replaced at deploy time; the module
+# constants bake in the defaults so the raw strings remain valid workers.
 # ---------------------------------------------------------------------------
 
-CLOUDFLARE_WORKER_CODE = """export default {
-  async fetch(request, env, ctx) {
-    const SECRET = __RELAY_SECRET__;
-    if (request.headers.get("x-relay-key") !== SECRET) {
-      return new Response(JSON.stringify({ error: "unauthorized" }), {
-        status: 401,
-        headers: { "content-type": "application/json", "x-relay-error": "unauthorized" },
-      });
+RELAY_ALLOW_DEFAULT = "zcode.z.ai,www.zcode.z.ai,httpbin.org"
+
+# Shared JS guard, pasted into every worker. Expects in scope:
+#   secret (string), allowList (string[]), reject(body, status)
+RELAY_GUARD_JS = """    if (secret) {
+      const got = request.headers.get("x-relay-secret") || "";
+      let diff = got.length === secret.length ? 0 : 1;
+      for (let i = 0; i < got.length && i < secret.length; i++) {
+        diff |= got.charCodeAt(i) ^ secret.charCodeAt(i);
+      }
+      if (diff !== 0) return reject("Relay secret mismatch", 403);
     }
     const target = request.headers.get("x-relay-target");
     const relayPath = request.headers.get("x-relay-path") || "/";
-    if (!target) {
-      return new Response(JSON.stringify({ error: "Missing x-relay-target header" }), {
-        status: 400,
-        headers: { "content-type": "application/json" },
-      });
+    if (!target) return reject("Missing x-relay-target header", 400);
+    let targetUrl;
+    try {
+      const u = new URL(target.replace(/\\/$/, "") + relayPath);
+      if (u.protocol !== "https:")
+        return reject("x-relay-target must be https", 403);
+      if (!allowList.includes(u.hostname.toLowerCase()))
+        return reject("x-relay-target host not allowed: " + u.hostname, 403);
+      targetUrl = u.toString();
+    } catch (e) {
+      return reject("Invalid x-relay-target header", 400);
     }
-    const targetUrl = target.replace(/\\/$/, "") + relayPath;
+"""
+
+CLOUDFLARE_WORKER_CODE = """export default {
+  async fetch(request, env, ctx) {
+    const reject = (body, status) => new Response(JSON.stringify({ error: body }), {
+      status,
+      headers: { "content-type": "application/json", "cache-control": "no-store", "x-relay-reject": "1" },
+    });
+    const secret = (env && env.ZCODE_RELAY_SECRET) || "__RELAY_SECRET__";
+    const allowList = (((env && env.ZCODE_RELAY_ALLOW) || "__RELAY_ALLOW__")
+      .split(",").map(s => s.trim().toLowerCase()).filter(Boolean));
+__GUARD__
     const newRequestInit = {
       method: request.method,
       headers: new Headers(request.headers),
     };
     if (request.method !== "GET" && request.method !== "HEAD") {
-      // Buffer the body: a stream is single-use and fetch cannot resend it
-      // when the upstream answers a redirect ("one-time-use body" 502).
+      // Buffer the body: a stream is one-time-use, so a redirect from the
+      // target upstream would fail to replay it (502 "body already used").
       newRequestInit.body = await request.arrayBuffer();
     }
     newRequestInit.headers.delete("x-relay-target");
     newRequestInit.headers.delete("x-relay-path");
-    newRequestInit.headers.delete("x-relay-key");
+    newRequestInit.headers.delete("x-relay-secret");
     newRequestInit.headers.delete("host");
     try {
       const response = await fetch(targetUrl, newRequestInit);
+      const respHeaders = new Headers(response.headers);
+      respHeaders.set("cache-control", "no-store");
+      respHeaders.set("x-relay-hop", "zcode-relay");
       return new Response(response.body, {
         status: response.status,
-        headers: response.headers,
+        headers: respHeaders,
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
-        status: 502,
-        headers: { "content-type": "application/json" },
-      });
+      return reject(error.message || "Relay fetch failed", 502);
     }
   },
 };
-"""
+""".replace("__GUARD__", RELAY_GUARD_JS)
 
 VERCEL_RELAY_CODE = """export const config = { runtime: "edge" };
 
+const SECRET = "__RELAY_SECRET__";
+const ALLOW_LIST = "__RELAY_ALLOW__"
+  .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+
 export default async function handler(req) {
-  const SECRET = __RELAY_SECRET__;
-  if (req.headers.get("x-relay-key") !== SECRET) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
-      status: 401,
-      headers: { "content-type": "application/json", "x-relay-error": "unauthorized" },
-    });
-  }
-  const target = req.headers.get("x-relay-target");
-  const relayPath = req.headers.get("x-relay-path") || "/";
-  if (!target) {
-    return new Response(JSON.stringify({ error: "Missing x-relay-target header" }), {
-      status: 400,
-      headers: { "content-type": "application/json" },
-    });
-  }
-  const targetUrl = target.replace(/\\/$/, "") + relayPath;
+  const reject = (body, status) => new Response(JSON.stringify({ error: body }), {
+    status,
+    headers: { "content-type": "application/json", "cache-control": "no-store", "x-relay-reject": "1" },
+  });
+  const request = req;
+  const secret = SECRET;
+  const allowList = ALLOW_LIST;
+__GUARD__
   const rawHeaders = {};
   for (const [k, v] of req.headers.entries()) rawHeaders[k] = v;
   delete rawHeaders["x-relay-target"];
   delete rawHeaders["x-relay-path"];
-  delete rawHeaders["x-relay-key"];
+  delete rawHeaders["x-relay-secret"];
   delete rawHeaders["host"];
   const response = await fetch(targetUrl, {
     method: req.method,
     headers: rawHeaders,
-    body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
-    duplex: "half",
+    body: req.method !== "GET" && req.method !== "HEAD"
+      ? await req.arrayBuffer() : undefined,
   });
+  const respHeaders = new Headers(response.headers);
+  respHeaders.set("cache-control", "no-store");
+  respHeaders.set("x-relay-hop", "zcode-relay");
   return new Response(response.body, {
     status: response.status,
-    headers: response.headers,
+    headers: respHeaders,
   });
 }
-"""
+""".replace("__GUARD__", RELAY_GUARD_JS.replace("request.headers", "req.headers")
+                                        .replace("request.method", "req.method"))
 
-DENO_RELAY_CODE = """Deno.serve(async (request) => {
-  const SECRET = __RELAY_SECRET__;
-  if (request.headers.get("x-relay-key") !== SECRET) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
-      status: 401,
-      headers: { "content-type": "application/json", "x-relay-error": "unauthorized" },
-    });
-  }
-  const target = request.headers.get("x-relay-target");
-  const relayPath = request.headers.get("x-relay-path") || "/";
-  if (!target) {
-    return new Response(JSON.stringify({ error: "Missing x-relay-target header" }), {
-      status: 400,
-      headers: { "content-type": "application/json" },
-    });
-  }
-  const targetUrl = target.replace(/\\/$/, "") + relayPath;
+DENO_RELAY_CODE = """const SECRET = "__RELAY_SECRET__";
+const ALLOW_LIST = "__RELAY_ALLOW__"
+  .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+
+Deno.serve(async (request) => {
+  const reject = (body, status) => new Response(JSON.stringify({ error: body }), {
+    status,
+    headers: { "content-type": "application/json", "cache-control": "no-store", "x-relay-reject": "1" },
+  });
+  const secret = SECRET;
+  const allowList = ALLOW_LIST;
+__GUARD__
   const newHeaders = new Headers(request.headers);
   newHeaders.delete("x-relay-target");
   newHeaders.delete("x-relay-path");
-  newHeaders.delete("x-relay-key");
+  newHeaders.delete("x-relay-secret");
   newHeaders.delete("host");
   const init = {
     method: request.method,
     headers: newHeaders,
   };
   if (request.method !== "GET" && request.method !== "HEAD") {
-    init.body = request.body;
-    init.duplex = "half";
+    init.body = await request.arrayBuffer();
   }
   try {
     const response = await fetch(targetUrl, init);
+    const respHeaders = new Headers(response.headers);
+    respHeaders.set("cache-control", "no-store");
+    respHeaders.set("x-relay-hop", "zcode-relay");
     return new Response(response.body, {
       status: response.status,
-      headers: response.headers,
+      headers: respHeaders,
     });
   } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 502,
-      headers: { "content-type": "application/json" },
-    });
+    return reject(error.message || "Relay fetch failed", 502);
   }
 });
-"""
+""".replace("__GUARD__", RELAY_GUARD_JS)
 
 NETLIFY_RELAY_CODE = """exports.handler = async (event) => {
   const headers = {};
   for (const [k, v] of Object.entries(event.headers || {})) {
     headers[k.toLowerCase()] = v;
   }
-  const SECRET = __RELAY_SECRET__;
-  if (headers["x-relay-key"] !== SECRET) {
-    return {
-      statusCode: 401,
-      headers: { "content-type": "application/json", "x-relay-error": "unauthorized" },
-      body: JSON.stringify({ error: "unauthorized" }),
-    };
-  }
-  const target = headers["x-relay-target"];
-  const relayPath = headers["x-relay-path"] || "/";
-  if (!target) {
-    return {
-      statusCode: 400,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ error: "Missing x-relay-target header" }),
-    };
-  }
-  const targetUrl = target.replace(/\\/$/, "") + relayPath;
+  const reject = (body, status) => ({
+    statusCode: status,
+    headers: { "content-type": "application/json", "cache-control": "no-store", "x-relay-reject": "1" },
+    body: JSON.stringify({ error: body }),
+  });
+  const SECRET = "__RELAY_SECRET__";
+  const ALLOW_LIST = "__RELAY_ALLOW__"
+    .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+  const secret = SECRET;
+  const allowList = ALLOW_LIST;
+  const request = { headers: { get: (k) => headers[k.toLowerCase()] || null } };
+__GUARD__
   const forwardHeaders = { ...event.headers };
   for (const k of Object.keys(forwardHeaders)) {
     const lower = k.toLowerCase();
-    if (lower === "x-relay-target" || lower === "x-relay-path"
-        || lower === "x-relay-key" || lower === "host") {
+    if (["x-relay-target", "x-relay-path", "x-relay-secret", "host"].includes(lower)) {
       delete forwardHeaders[k];
     }
   }
@@ -313,8 +292,10 @@ NETLIFY_RELAY_CODE = """exports.handler = async (event) => {
     });
     const responseHeaders = {};
     upstream.headers.forEach((value, key) => {
+      if (key.toLowerCase() === "cache-control") value = "no-store";
       responseHeaders[key] = value;
     });
+    responseHeaders["x-relay-hop"] = "zcode-relay";
     const contentType = upstream.headers.get("content-type") || "";
     const isText = new RegExp("^(text/|[^;]*json|[^;]*event-stream|[^;]*javascript|[^;]*xml|[^;]*urlencoded)", "i").test(contentType);
     const rawBody = await upstream.arrayBuffer();
@@ -328,14 +309,21 @@ NETLIFY_RELAY_CODE = """exports.handler = async (event) => {
       isBase64Encoded: !isText,
     };
   } catch (error) {
-    return {
-      statusCode: 502,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ error: error.message || "Relay fetch failed" }),
-    };
+    return reject(error.message || "Relay fetch failed", 502);
   }
 };
-"""
+""".replace("__GUARD__", RELAY_GUARD_JS)
+
+
+def bake_relay_code(code: str, secret: str = "", allow: str = "") -> str:
+    """Fill a worker template with the per-relay secret and allowlist.
+
+    The secret is a generated hex string and the allowlist a comma list of
+    hostnames — neither can contain quotes/backslashes, so plain substitution
+    inside the JS string literals is safe."""
+    return (code
+            .replace("__RELAY_SECRET__", secret or "")
+            .replace("__RELAY_ALLOW__", allow or RELAY_ALLOW_DEFAULT))
 
 NETLIFY_INDEX_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"><title>AutoZCoder Relay</title></head>
@@ -348,11 +336,10 @@ NETLIFY_INDEX_HTML = """<!doctype html>
 # ---------------------------------------------------------------------------
 
 def deploy_cloudflare(account_id: str, api_token: str, project_name: str = "",
-                      relay_secret: str = "") -> dict[str, Any]:
+                      secret: str = "") -> dict[str, Any]:
     account_id = (account_id or "").strip()
     api_token = (api_token or "").strip()
     project_name = (project_name or "").strip() or f"cloudflare-relay-{int(time.time())}"
-    relay_secret = (relay_secret or "").strip() or new_relay_secret()
 
     if not account_id or not api_token:
         raise ValueError("Cloudflare Account ID and API Token are required")
@@ -360,14 +347,20 @@ def deploy_cloudflare(account_id: str, api_token: str, project_name: str = "",
     script_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/workers/scripts/{project_name}"
     headers = {"Authorization": f"Bearer {api_token}", "User-Agent": UA}
 
-    # 1. Upload Worker Script via multipart/form-data
+    # 1. Upload Worker Script via multipart/form-data. The relay secret rides
+    # as a plain_text binding — the worker compares it against x-relay-secret.
     metadata = {
         "main_module": "index.js",
         "compatibility_date": "2024-03-20",
         "observability": {"enabled": True},
     }
+    if secret:
+        metadata["bindings"] = [
+            {"type": "plain_text", "name": "ZCODE_RELAY_SECRET", "text": secret},
+        ]
     files = {
-        "index.js": ("index.js", render_worker(CLOUDFLARE_WORKER_CODE, relay_secret).encode("utf-8"), "application/javascript+module"),
+        "index.js": ("index.js", bake_relay_code(CLOUDFLARE_WORKER_CODE, secret).encode("utf-8"),
+                     "application/javascript+module"),
         "metadata": ("metadata.json", json.dumps(metadata).encode("utf-8"), "application/json"),
     }
     upload_res = _call("put", script_url, headers=headers, files=files, timeout=45)
@@ -412,7 +405,6 @@ def deploy_cloudflare(account_id: str, api_token: str, project_name: str = "",
         "name": project_name,
         "type": "cloudflare",
         "url": deploy_url,
-        "relay_key": relay_secret,
     }
 
 
@@ -420,11 +412,9 @@ def deploy_cloudflare(account_id: str, api_token: str, project_name: str = "",
 # Vercel Deploy
 # ---------------------------------------------------------------------------
 
-def deploy_vercel(vercel_token: str, project_name: str = "",
-                   relay_secret: str = "") -> dict[str, Any]:
+def deploy_vercel(vercel_token: str, project_name: str = "", secret: str = "") -> dict[str, Any]:
     vercel_token = (vercel_token or "").strip()
     project_name = (project_name or "").strip() or f"vercel-relay-{int(time.time())}"
-    relay_secret = (relay_secret or "").strip() or new_relay_secret()
 
     if not vercel_token:
         raise ValueError("Vercel API token is required")
@@ -435,11 +425,12 @@ def deploy_vercel(vercel_token: str, project_name: str = "",
         "User-Agent": UA,
     }
 
-    # 1. Create deployment
+    # 1. Create deployment (secret baked into the source: the platform has no
+    # single-call deploy+env API, and source lives in the user's own project)
     payload = {
         "name": project_name,
         "files": [
-            {"file": "api/relay.js", "data": render_worker(VERCEL_RELAY_CODE, relay_secret)},
+            {"file": "api/relay.js", "data": bake_relay_code(VERCEL_RELAY_CODE, secret)},
             {"file": "package.json", "data": json.dumps({"name": project_name, "version": "1.0.0"})},
             {"file": "vercel.json", "data": json.dumps({"rewrites": [{"source": "/(.*)", "destination": "/api/relay"}]})},
         ],
@@ -497,7 +488,6 @@ def deploy_vercel(vercel_token: str, project_name: str = "",
         "name": project_name,
         "type": "vercel",
         "url": deploy_url,
-        "relay_key": relay_secret,
     }
 
 
@@ -506,11 +496,10 @@ def deploy_vercel(vercel_token: str, project_name: str = "",
 # ---------------------------------------------------------------------------
 
 def deploy_deno(deno_token: str, org_domain: str, app_name: str = "",
-                relay_secret: str = "") -> dict[str, Any]:
+                secret: str = "") -> dict[str, Any]:
     deno_token = (deno_token or "").strip()
     org_domain = (org_domain or "").strip()
     app_name = (app_name or "").strip() or f"deno-relay-{int(time.time())}"
-    relay_secret = (relay_secret or "").strip() or new_relay_secret()
 
     if not deno_token:
         raise ValueError("Deno Deploy API token is required")
@@ -543,7 +532,7 @@ def deploy_deno(deno_token: str, org_domain: str, app_name: str = "",
         "assets": {
             "main.ts": {
                 "kind": "file",
-                "content": render_worker(DENO_RELAY_CODE, relay_secret),
+                "content": bake_relay_code(DENO_RELAY_CODE, secret),
                 "encoding": "utf-8",
             }
         }
@@ -596,7 +585,6 @@ def deploy_deno(deno_token: str, org_domain: str, app_name: str = "",
         "name": app_name,
         "type": "deno",
         "url": deploy_url,
-        "relay_key": relay_secret,
     }
 
 
@@ -604,20 +592,18 @@ def deploy_deno(deno_token: str, org_domain: str, app_name: str = "",
 # Netlify Deploy
 # ---------------------------------------------------------------------------
 
-def _build_netlify_zip(relay_secret: str = "") -> tuple[bytes, str]:
+def _build_netlify_zip(secret: str = "") -> tuple[bytes, str]:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("relay.js", render_worker(NETLIFY_RELAY_CODE, relay_secret))
+        z.writestr("relay.js", bake_relay_code(NETLIFY_RELAY_CODE, secret))
     zip_bytes = buf.getvalue()
     sha256 = hashlib.sha256(zip_bytes).hexdigest()
     return zip_bytes, sha256
 
 
-def deploy_netlify(netlify_token: str, site_name: str = "",
-                   relay_secret: str = "") -> dict[str, Any]:
+def deploy_netlify(netlify_token: str, site_name: str = "", secret: str = "") -> dict[str, Any]:
     netlify_token = (netlify_token or "").strip()
     site_name = (site_name or "").strip().lower() or f"netlify-relay-{int(time.time())}"
-    relay_secret = (relay_secret or "").strip() or new_relay_secret()
     # Netlify site names: lowercase alphanumerics + hyphens
     site_name = "".join(c if c.isalnum() or c == "-" else "-" for c in site_name).strip("-")
 
@@ -644,7 +630,7 @@ def deploy_netlify(netlify_token: str, site_name: str = "",
     # 2. Prepare digest bundle
     index_bytes = NETLIFY_INDEX_HTML.encode("utf-8")
     index_sha1 = hashlib.sha1(index_bytes).hexdigest()
-    zip_bytes, fn_sha256 = _build_netlify_zip(relay_secret)
+    zip_bytes, fn_sha256 = _build_netlify_zip(secret)
 
     deploy_res = _call("post", f"https://api.netlify.com/api/v1/sites/{site_id}/deploys", headers=headers, json={
         "files": {"/index.html": index_sha1},
@@ -698,7 +684,6 @@ def deploy_netlify(netlify_token: str, site_name: str = "",
         "name": site_name,
         "type": "netlify",
         "url": deploy_url,
-        "relay_key": relay_secret,
     }
 
 
@@ -706,8 +691,7 @@ def deploy_netlify(netlify_token: str, site_name: str = "",
 # Test Relay Connectivity
 # ---------------------------------------------------------------------------
 
-def ping_relay(relay_url: str, timeout: float = 12.0,
-               relay_key: str = "") -> dict[str, Any]:
+def ping_relay(relay_url: str, timeout: float = 12.0, secret: str = "") -> dict[str, Any]:
     relay_url = (relay_url or "").strip()
     if not relay_url or not relay_url.startswith("http"):
         return {"ok": False, "status": 400, "error": "Invalid relay URL"}
@@ -717,13 +701,13 @@ def ping_relay(relay_url: str, timeout: float = 12.0,
         "x-relay-path": "/get",
         "User-Agent": UA,
     }
-    if relay_key:
-        headers[RELAY_KEY_HEADER] = relay_key
+    if secret:
+        headers["x-relay-secret"] = secret
     t0 = time.time()
     try:
-        # TLS is verified: truststore (injected at import) points the whole
-        # process at the OS trust store, which is what a frozen build needs.
-        r = requests.get(relay_url, headers=headers, timeout=timeout)
+        # TLS stays verified (truststore/certifi are wired on the session
+        # above); verify=False here would let a MITM fake a healthy relay
+        r = requests.get(relay_url, headers=headers, timeout=timeout, verify=True)
         elapsed_ms = int((time.time() - t0) * 1000)
         if r.status_code == 200:
             return {"ok": True, "status": 200, "elapsed_ms": elapsed_ms}
@@ -739,7 +723,7 @@ def _ping_status_text(status: int, body: str) -> str:
     """What a non-200 answer from a RELAY URL means, in plain words."""
     snippet = (body or "").strip().replace("\n", " ")[:80]
     if status in (401, 403):
-        return f"The relay refused the request (HTTP {status}) - bad shared key or deployment protection / wrong URL."
+        return f"The relay refused the request (HTTP {status}) - deployment protection or a wrong URL."
     if status == 404:
         return "Nothing is deployed at this relay URL (HTTP 404) - check the address."
     if status == 429:
